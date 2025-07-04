@@ -1,0 +1,278 @@
+import pygame
+import sys
+import random
+import json
+import os
+from pygame import mixer
+
+# Инициализация Pygame и микшера
+pygame.init()
+mixer.init()
+
+# Настройки окна
+WIDTH, HEIGHT = 1024, 768  # Увеличили разрешение
+FPS = 60
+TILE_SIZE = 64
+
+# Цвета
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+BLUE = (30, 144, 255)
+GREEN = (34, 139, 34)
+GOLD = (255, 215, 0)
+RED = (255, 0, 0)
+DARK_GREEN = (0, 100, 0)
+PURPLE = (128, 0, 128)
+YELLOW = (255, 255, 0)
+
+# Создание окна
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Modern Zombie Platformer 2.0")
+clock = pygame.time.Clock()
+
+# Загрузка изображений (заглушки, замените на реальные спрайты)
+def load_image(color, width=TILE_SIZE, height=TILE_SIZE, scale=1):
+    img = pygame.Surface((width, height), pygame.SRCALPHA)
+    img.fill(color)
+    return pygame.transform.scale(img, (width * scale, height * scale))
+
+# Загрузка звуков
+def load_sound(file):
+    try:
+        return mixer.Sound(f"sounds/{file}")
+    except:
+        print(f"Ошибка загрузки звука: {file}")
+        return None
+
+# Класс игрока с анимациями
+class Player(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.walk_frames = [load_image(BLUE, scale=0.8) for _ in range(4)]  # Заглушка анимации
+        self.jump_frame = load_image((0, 0, 255), scale=0.8)
+        self.current_frame = 0
+        self.image = self.walk_frames[0]
+        self.rect = self.image.get_rect(topleft=(x, y))
+        self.velocity_y = 0
+        self.jumping = False
+        self.speed = 5
+        self.health = 100
+        self.invincible = False
+        self.invincible_timer = 0
+        self.animation_timer = 0
+        self.direction = 1  # 1 = вправо, -1 = влево
+        self.sounds = {
+            "jump": load_sound("jump.wav"),
+            "hurt": load_sound("hurt.wav")
+        }
+
+    def update(self, platforms, enemies, powerups):
+        keys = pygame.key.get_pressed()
+        
+        # Движение
+        if keys[pygame.K_LEFT]:
+            self.direction = -1
+            self.rect.x -= self.speed
+        if keys[pygame.K_RIGHT]:
+            self.direction = 1
+            self.rect.x += self.speed
+
+        # Анимация ходьбы
+        if keys[pygame.K_LEFT] or keys[pygame.K_RIGHT]:
+            self.animation_timer += 1
+            if self.animation_timer > 10:
+                self.current_frame = (self.current_frame + 1) % len(self.walk_frames)
+                self.image = pygame.transform.flip(self.walk_frames[self.current_frame], self.direction == -1, False)
+                self.animation_timer = 0
+
+        # Гравитация
+        self.velocity_y += 0.5
+        self.rect.y += self.velocity_y
+
+        # Коллизия с платформами
+        for platform in platforms:
+            if self.rect.colliderect(platform.rect):
+                if self.velocity_y > 0:  # Падение вниз
+                    self.rect.bottom = platform.rect.top
+                    self.velocity_y = 0
+                    self.jumping = False
+                elif self.velocity_y < 0:  # Прыжок вверх
+                    self.rect.top = platform.rect.bottom
+                    self.velocity_y = 0
+
+        # Коллизия с врагами
+        if not self.invincible:
+            for enemy in enemies:
+                if self.rect.colliderect(enemy.rect):
+                    if self.velocity_y > 0 and self.rect.bottom < enemy.rect.centery:  # Прыжок на врага
+                        enemy.take_damage(50)
+                        self.velocity_y = -10
+                        if self.sounds["jump"]:
+                            self.sounds["jump"].play()
+                    else:  # Получение урона
+                        self.health -= 10
+                        self.invincible = True
+                        self.invincible_timer = pygame.time.get_ticks()
+                        if self.sounds["hurt"]:
+                            self.sounds["hurt"].play()
+
+        # Неуязвимость (мерцание)
+        if self.invincible:
+            alpha = (pygame.time.get_ticks() // 100) % 255
+            self.image.set_alpha(alpha)
+            if pygame.time.get_ticks() - self.invincible_timer > 2000:
+                self.invincible = False
+                self.image.set_alpha(255)
+
+    def jump(self):
+        if not self.jumping:
+            self.velocity_y = -15
+            self.jumping = True
+            if self.sounds["jump"]:
+                self.sounds["jump"].play()
+
+# Класс босса с огненными шарами
+class Fireball(pygame.sprite.Sprite):
+    def __init__(self, x, y, direction):
+        super().__init__()
+        self.image = load_image(RED, scale=0.5)
+        self.rect = self.image.get_rect(center=(x, y))
+        self.speed = 7 * direction
+        self.lifetime = 180  # 3 секунды
+
+    def update(self):
+        self.rect.x += self.speed
+        self.lifetime -= 1
+        if self.lifetime <= 0:
+            self.kill()
+
+# Класс босса
+class Boss(pygame.sprite.Sprite):
+    def __init__(self, x, y, boss_type):
+        super().__init__()
+        self.boss_type = boss_type
+        self.health = 300 if boss_type == "king" else 200
+        self.attack_cooldown = 0
+        self.speed = 2
+        self.phase = 1
+        self.load_assets()
+        self.rect = self.image.get_rect(topleft=(x, y))
+        self.sounds = {
+            "roar": load_sound("boss_roar.wav"),
+            "fire": load_sound("fireball.wav")
+        }
+
+    def load_assets(self):
+        if self.boss_type == "king":
+            self.image = load_image((0, 0, 128), width=120, height=120)
+        elif self.boss_type == "fire":
+            self.image = load_image((255, 100, 0), width=100, height=100)
+        else:  # default
+            self.image = load_image(RED, width=100, height=100)
+
+    def update(self, player, projectiles):
+        # Движение к игроку
+        if self.rect.x < player.rect.x:
+            self.rect.x += self.speed
+        else:
+            self.rect.x -= self.speed
+
+        # Атака в зависимости от типа
+        if self.attack_cooldown <= 0:
+            if self.boss_type == "fire":
+                projectiles.add(Fireball(self.rect.centerx, self.rect.centery, 1))
+                projectiles.add(Fireball(self.rect.centerx, self.rect.centery, -1))
+                if self.sounds["fire"]:
+                    self.sounds["fire"].play()
+            self.attack_cooldown = 120  # 2 секунды
+        else:
+            self.attack_cooldown -= 1
+
+        # Переход во 2-ю фазу
+        if self.health <= self.health // 2 and self.phase == 1:
+            self.speed *= 1.5
+            self.phase = 2
+            if self.sounds["roar"]:
+                self.sounds["roar"].play()
+
+# Система сохранения
+def save_game(level, score, health):
+    data = {
+        "level": level,
+        "score": score,
+        "health": health
+    }
+    with open("save.json", "w") as f:
+        json.dump(data, f)
+
+def load_game():
+    try:
+        with open("save.json", "r") as f:
+            return json.load(f)
+    except:
+        return {"level": 1, "score": 0, "health": 100}
+
+# Основная функция
+def main():
+    # Загрузка сохранения
+    save_data = load_game()
+    current_level = save_data["level"]
+    score = save_data["score"]
+
+    # Создание игрока
+    player = Player(100, HEIGHT - 150)
+    player.health = save_data["health"]
+
+    # Главный цикл
+    running = True
+    while running:
+        # Генерация уровня
+        level = Level(current_level)
+        all_sprites = pygame.sprite.Group(player, *level.platforms, *level.enemies, *level.coins, *level.powerups)
+
+        # Спавн босса на каждом 5-м уровне
+        if current_level % 5 == 0:
+            boss_type = random.choice(["king", "fire"])
+            boss = Boss(WIDTH // 2, 100, boss_type)
+            level.enemies.add(boss)
+            all_sprites.add(boss)
+
+        # Игровой цикл уровня
+        level_running = True
+        while level_running:
+            # Обработка событий
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    save_game(current_level, score, player.health)
+                    running = False
+                    level_running = False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        player.jump()
+
+            # Обновление
+            player.update(level.platforms, level.enemies, level.powerups)
+            level.enemies.update(level.platforms)
+
+            # Проверка на смерть игрока
+            if player.health <= 0:
+                save_game(1, 0, 100)  # Сброс
+                level_running = False
+
+            # Переход на следующий уровень
+            if level.exit_portal and player.rect.colliderect(level.exit_portal.rect):
+                current_level += 1
+                save_game(current_level, score, player.health)
+                level_running = False
+
+            # Отрисовка
+            screen.fill(BLACK)
+            all_sprites.draw(screen)
+            pygame.display.flip()
+            clock.tick(FPS)
+
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
